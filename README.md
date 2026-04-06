@@ -1,6 +1,6 @@
 # Divy
 
-Divy is a small Rust proof of concept for allocating credits across heterogeneous distributed workers.
+Divy is a small Rust proof of concept for allocating credits across heterogeneous distributed workers and for translating those credits into bounded inference consumption.
 
 It is designed for systems where:
 
@@ -33,6 +33,8 @@ This approach is useful when you want a credit policy that:
 - avoids rewarding stragglers for raw elapsed time
 
 ## Usage
+
+### Contribution payout
 
 ```rust
 use divy::{compute_credit_policy, AssignmentCreditInput, CreditPolicyInput};
@@ -67,6 +69,28 @@ for assignment in result.assignments {
 }
 ```
 
+### Consumption quote and settlement
+
+```rust
+use divy::{
+    quote_consumption, settle_consumption, ConsumptionQuoteInput, ConsumptionSettlementInput,
+};
+
+let reservation = quote_consumption(ConsumptionQuoteInput {
+    prompt_tokens: 128,
+    requested_completion_tokens: 256,
+    total_model_bytes: 64 * 1024 * 1024 * 1024,
+});
+
+let settlement = settle_consumption(ConsumptionSettlementInput {
+    prompt_tokens: 128,
+    actual_completion_tokens: 180,
+    total_model_bytes: 64 * 1024 * 1024 * 1024,
+});
+
+assert!(reservation.total_credits >= settlement.total_credits);
+```
+
 ## Status
 
 Divy is intentionally narrow.
@@ -75,11 +99,13 @@ It focuses on the payout core only:
 
 - fixed job budget
 - normalized contribution scoring
+- deterministic consumption quote/settlement
 - transparent breakdowns per worker
 
 It does not include:
 
 - scheduling
+- runtime isolation or sandboxing
 - benchmarking orchestration
 - fraud detection
 - ledger persistence
@@ -94,4 +120,3 @@ cargo test
 ## License
 
 MIT
-
