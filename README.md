@@ -1,22 +1,24 @@
 # Divy
 
-Divy is a small Rust proof of concept for how a distributed inference network can account for both worker contribution and inference consumption.
+Divy is a small Rust proof of concept for how a distributed inference network can credit worker contribution and burn submitter credits as the same job progresses.
 
 It is designed for systems where:
 
 - workers are assigned unequal amounts of work
 - devices have different performance envelopes
-- slower workers should not earn more simply because they took longer
-- total credit movement per job should stay bounded and auditable
+- credit movement should stay bounded and auditable
+- inference consumption should use the same unit that workers earn
 
 ## Model
 
-Divy models two linked sides of the same credit system:
+Divy treats the network as one linked accounting pipeline:
 
-- contribution payout across workers
-- inference consumption against the submitter
+- reserve credits before work starts
+- stream contribution credit to workers as the shared frontier advances
+- burn submitter credits against that same frontier
+- reconcile only the small difference between reserved and actually consumed work
 
-For contribution payout, Divy computes a fixed job budget and then divides that budget across workers using:
+Contribution payout is still based on:
 
 - assigned work share
 - measured service rate
@@ -26,7 +28,7 @@ At a high level:
 
 `credits = job_budget * normalized(contribution_share * throughput_multiplier * resource_pressure_multiplier)`
 
-The library does not try to infer correctness or trust on its own. It expects callers to pass only verified successful assignments.
+The library does not prove correctness or trust on its own. It expects callers to pass verified assignment and frontier data.
 
 ## Why
 
@@ -37,17 +39,36 @@ This approach is useful when you want a credit model that:
 - gives a modest premium to hardware under tighter resource pressure
 - avoids rewarding stragglers for raw elapsed time
 - keeps inference usage bounded by the same unit the workers earn
+- supports realtime wallet-style accounting instead of only end-of-job settlement
 
 ## Usage
 
-### Contribution payout
+### Reserve inference upfront
 
 ```rust
-use divy::{compute_credit_policy, AssignmentCreditInput, CreditPolicyInput};
+use divy::{quote_consumption, ConsumptionQuoteInput};
 
-let result = compute_credit_policy(CreditPolicyInput {
-    prompt_tokens: 8,
-    completion_tokens: 4,
+let reservation = quote_consumption(ConsumptionQuoteInput {
+    prompt_tokens: 128,
+    requested_completion_tokens: 256,
+    total_model_bytes: 64 * 1024 * 1024 * 1024,
+});
+
+println!("reserve {:.3} credits", reservation.total_credits);
+```
+
+### Account for realtime frontier progress
+
+```rust
+use divy::{
+    compute_realtime_accounting_delta, AssignmentCreditInput, RealtimeAccountingInput,
+};
+
+let delta = compute_realtime_accounting_delta(RealtimeAccountingInput {
+    prompt_tokens: 128,
+    frontier_completion_tokens: 32,
+    accounted_completion_tokens: 24,
+    prompt_credits_accounted: true,
     total_model_bytes: 64 * 1024 * 1024 * 1024,
     total_columns: 8192,
     assignments: vec![
@@ -68,25 +89,19 @@ let result = compute_credit_policy(CreditPolicyInput {
             available_memory_bytes: 16 * 1024 * 1024 * 1024,
         },
     ],
-});
+})
+.expect("expected new accounting work");
 
-for assignment in result.assignments {
+println!("burn {:.3} credits", delta.consumption.total_credits);
+for assignment in delta.contribution.assignments {
     println!("{} earned {:.3} credits", assignment.worker_id, assignment.credits);
 }
 ```
 
-### Consumption quote and settlement
+### Reconcile actual consumption
 
 ```rust
-use divy::{
-    quote_consumption, settle_consumption, ConsumptionQuoteInput, ConsumptionSettlementInput,
-};
-
-let reservation = quote_consumption(ConsumptionQuoteInput {
-    prompt_tokens: 128,
-    requested_completion_tokens: 256,
-    total_model_bytes: 64 * 1024 * 1024 * 1024,
-});
+use divy::{settle_consumption, ConsumptionSettlementInput};
 
 let settlement = settle_consumption(ConsumptionSettlementInput {
     prompt_tokens: 128,
@@ -94,7 +109,7 @@ let settlement = settle_consumption(ConsumptionSettlementInput {
     total_model_bytes: 64 * 1024 * 1024 * 1024,
 });
 
-assert!(reservation.total_credits >= settlement.total_credits);
+println!("actual burn {:.3} credits", settlement.total_credits);
 ```
 
 ## Status
@@ -103,10 +118,11 @@ Divy is intentionally narrow.
 
 It focuses on the policy core:
 
-- fixed job budgeting
+- reservation quote
 - normalized contribution scoring
-- deterministic consumption quote/settlement
-- transparent breakdowns per worker and per job
+- realtime accounting deltas
+- deterministic consumption breakdowns
+- transparent per-worker and per-frontier outputs
 
 It does not include:
 

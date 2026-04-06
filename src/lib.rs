@@ -47,12 +47,32 @@ pub struct ConsumptionSettlementInput {
     pub total_model_bytes: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct RealtimeAccountingInput {
+    pub prompt_tokens: u32,
+    pub frontier_completion_tokens: u32,
+    pub accounted_completion_tokens: u32,
+    pub prompt_credits_accounted: bool,
+    pub total_model_bytes: u64,
+    pub total_columns: u32,
+    pub assignments: Vec<AssignmentCreditInput>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ConsumptionPolicyOutput {
     pub model_size_factor: f64,
     pub prompt_credits: f64,
     pub completion_credits: f64,
     pub total_credits: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RealtimeAccountingOutput {
+    pub prompt_tokens_delta: u32,
+    pub completion_tokens_delta: u32,
+    pub frontier_completion_tokens: u32,
+    pub contribution: CreditPolicyOutput,
+    pub consumption: ConsumptionPolicyOutput,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,6 +211,52 @@ pub fn settle_consumption(input: ConsumptionSettlementInput) -> ConsumptionPolic
     )
 }
 
+pub fn compute_consumption_components(
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_model_bytes: u64,
+) -> ConsumptionPolicyOutput {
+    compute_consumption(prompt_tokens, completion_tokens, total_model_bytes)
+}
+
+pub fn compute_realtime_accounting_delta(
+    input: RealtimeAccountingInput,
+) -> Option<RealtimeAccountingOutput> {
+    let prompt_tokens_delta = if input.prompt_credits_accounted {
+        0
+    } else {
+        input.prompt_tokens
+    };
+    let completion_tokens_delta = input
+        .frontier_completion_tokens
+        .saturating_sub(input.accounted_completion_tokens);
+
+    if prompt_tokens_delta == 0 && completion_tokens_delta == 0 {
+        return None;
+    }
+
+    let contribution = compute_credit_policy(CreditPolicyInput {
+        prompt_tokens: prompt_tokens_delta,
+        completion_tokens: completion_tokens_delta,
+        total_model_bytes: input.total_model_bytes,
+        total_columns: input.total_columns,
+        assignments: input.assignments,
+    });
+    let consumption = compute_consumption_components(
+        prompt_tokens_delta,
+        completion_tokens_delta,
+        input.total_model_bytes,
+    );
+
+    Some(RealtimeAccountingOutput {
+        prompt_tokens_delta,
+        completion_tokens_delta,
+        frontier_completion_tokens: input.frontier_completion_tokens,
+        contribution,
+        consumption,
+    })
+}
+
 #[derive(Debug, Clone)]
 struct PreparedAssignment {
     worker_id: String,
@@ -205,7 +271,7 @@ fn compute_consumption(
     total_model_bytes: u64,
 ) -> ConsumptionPolicyOutput {
     let model_size_factor = (total_model_bytes as f64 / GIB / MODEL_SIZE_BUDGET_SCALE_GIB).max(1.0);
-    let prompt_credits = prompt_tokens.max(1) as f64 * model_size_factor;
+    let prompt_credits = prompt_tokens as f64 * model_size_factor;
     let completion_credits = completion_tokens as f64 * model_size_factor;
 
     ConsumptionPolicyOutput {
@@ -400,5 +466,110 @@ mod tests {
         approx_eq(result.prompt_credits, 10.0);
         approx_eq(result.completion_credits, 3.0);
         approx_eq(result.total_credits, 13.0);
+    }
+
+    #[test]
+    fn realtime_accounting_emits_prompt_delta_before_completion_frontier_moves() {
+        let result = compute_realtime_accounting_delta(RealtimeAccountingInput {
+            prompt_tokens: 8,
+            frontier_completion_tokens: 0,
+            accounted_completion_tokens: 0,
+            prompt_credits_accounted: false,
+            total_model_bytes: 64 * 1024 * 1024 * 1024,
+            total_columns: 8192,
+            assignments: vec![
+                AssignmentCreditInput {
+                    worker_id: "worker-a".into(),
+                    execution_time_ms: 500,
+                    assigned_capacity_units: 4,
+                    shard_column_start: 0,
+                    shard_column_end: 4096,
+                    available_memory_bytes: 16 * 1024 * 1024 * 1024,
+                },
+                AssignmentCreditInput {
+                    worker_id: "worker-b".into(),
+                    execution_time_ms: 500,
+                    assigned_capacity_units: 4,
+                    shard_column_start: 4096,
+                    shard_column_end: 8192,
+                    available_memory_bytes: 16 * 1024 * 1024 * 1024,
+                },
+            ],
+        })
+        .expect("expected prompt delta");
+
+        assert_eq!(result.prompt_tokens_delta, 8);
+        assert_eq!(result.completion_tokens_delta, 0);
+        approx_eq(result.consumption.total_credits, 16.0);
+        approx_eq(
+            result
+                .contribution
+                .assignments
+                .iter()
+                .map(|assignment| assignment.credits)
+                .sum::<f64>(),
+            result.contribution.job_credit_budget,
+        );
+    }
+
+    #[test]
+    fn realtime_accounting_emits_only_new_completion_frontier() {
+        let result = compute_realtime_accounting_delta(RealtimeAccountingInput {
+            prompt_tokens: 8,
+            frontier_completion_tokens: 6,
+            accounted_completion_tokens: 3,
+            prompt_credits_accounted: true,
+            total_model_bytes: 64 * 1024 * 1024 * 1024,
+            total_columns: 8192,
+            assignments: vec![
+                AssignmentCreditInput {
+                    worker_id: "worker-a".into(),
+                    execution_time_ms: 400,
+                    assigned_capacity_units: 4,
+                    shard_column_start: 0,
+                    shard_column_end: 4096,
+                    available_memory_bytes: 16 * 1024 * 1024 * 1024,
+                },
+                AssignmentCreditInput {
+                    worker_id: "worker-b".into(),
+                    execution_time_ms: 800,
+                    assigned_capacity_units: 4,
+                    shard_column_start: 4096,
+                    shard_column_end: 8192,
+                    available_memory_bytes: 16 * 1024 * 1024 * 1024,
+                },
+            ],
+        })
+        .expect("expected completion delta");
+
+        assert_eq!(result.prompt_tokens_delta, 0);
+        assert_eq!(result.completion_tokens_delta, 3);
+        approx_eq(result.consumption.prompt_credits, 0.0);
+        approx_eq(result.consumption.completion_credits, 6.0);
+        assert!(
+            result.contribution.assignments[0].credits > result.contribution.assignments[1].credits
+        );
+    }
+
+    #[test]
+    fn realtime_accounting_returns_none_when_frontier_is_already_accounted() {
+        let result = compute_realtime_accounting_delta(RealtimeAccountingInput {
+            prompt_tokens: 8,
+            frontier_completion_tokens: 3,
+            accounted_completion_tokens: 3,
+            prompt_credits_accounted: true,
+            total_model_bytes: 64 * 1024 * 1024 * 1024,
+            total_columns: 8192,
+            assignments: vec![AssignmentCreditInput {
+                worker_id: "worker-a".into(),
+                execution_time_ms: 400,
+                assigned_capacity_units: 4,
+                shard_column_start: 0,
+                shard_column_end: 8192,
+                available_memory_bytes: 32 * 1024 * 1024 * 1024,
+            }],
+        });
+
+        assert!(result.is_none());
     }
 }
