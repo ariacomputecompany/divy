@@ -1,17 +1,22 @@
 # Divy
 
-Divy is a small Rust proof of concept for allocating credits across heterogeneous distributed workers and for translating those credits into bounded inference consumption.
+Divy is a small Rust proof of concept for how a distributed inference network can account for both worker contribution and inference consumption.
 
 It is designed for systems where:
 
 - workers are assigned unequal amounts of work
 - devices have different performance envelopes
 - slower workers should not earn more simply because they took longer
-- total payout per job should stay bounded and auditable
+- total credit movement per job should stay bounded and auditable
 
 ## Model
 
-Divy computes a fixed job budget and then divides that budget across workers using:
+Divy models two linked sides of the same credit system:
+
+- contribution payout across workers
+- inference consumption against the submitter
+
+For contribution payout, Divy computes a fixed job budget and then divides that budget across workers using:
 
 - assigned work share
 - measured service rate
@@ -25,12 +30,13 @@ The library does not try to infer correctness or trust on its own. It expects ca
 
 ## Why
 
-This approach is useful when you want a credit policy that:
+This approach is useful when you want a credit model that:
 
 - rewards useful throughput
 - still pays workers that were assigned more real work
 - gives a modest premium to hardware under tighter resource pressure
 - avoids rewarding stragglers for raw elapsed time
+- keeps inference usage bounded by the same unit the workers earn
 
 ## Usage
 
@@ -95,12 +101,12 @@ assert!(reservation.total_credits >= settlement.total_credits);
 
 Divy is intentionally narrow.
 
-It focuses on the payout core only:
+It focuses on the policy core:
 
-- fixed job budget
+- fixed job budgeting
 - normalized contribution scoring
 - deterministic consumption quote/settlement
-- transparent breakdowns per worker
+- transparent breakdowns per worker and per job
 
 It does not include:
 
