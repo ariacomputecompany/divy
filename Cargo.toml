@@ -1,0 +1,11 @@
+[package]
+name = "divy"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Contribution-based credit allocation for heterogeneous distributed compute"
+repository = "https://github.com/ariacomputecompany/divy"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
